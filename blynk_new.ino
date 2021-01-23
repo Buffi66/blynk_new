@@ -12,12 +12,15 @@
 #define TINY_GSM_MODEM_SIM800
 
 #define PHOTOCELL_PIN 34
-#define LED_BLUE  13
+
+#define uS_TO_S_FACTOR 1000000  //Conversion factor for micro seconds to seconds
+#define TIME_TO_SLEEP  1800        //Time ESP32 will go to sleep (in seconds)
 
 #include <TinyGsmClient.h>
 #include <BlynkSimpleSIM800.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
+#include <esp_task_wdt.h>
 
 #include <Wire.h>
 #include "utilities.h"
@@ -31,29 +34,42 @@ Adafruit_BME280 bme280; // use I2C interface
 #define SerialAT Serial1
 TinyGsm modem(SerialAT);
 
+//Alditalk
 const char apn[]  = "internet.eplus.de";
 const char user[] = "eplus";
 const char pass[] = "internet";
+//Lidl Connect
+//const char apn[]  = "web.vodafone.de";
+//const char user[] = "guest";
+//const char pass[] = "guest";
 
 // You should get Auth Token in the Blynk App.
 // Go to the Project Settings (nut icon).
 const char auth[] = "wqGsknA0-mx3G8CNnolifE8ELm5MUATD";
 
+int wdtTimeout = 10 * 60; // 10 Minuten Watchdog Timeout
+
 boolean ledState = LOW;
 
-BlynkTimer timer; // Announcing the timer
-BlynkTimer timerLed; // Announcing the timer
 int sensorData = 0;
 int stoerung = 0;
 float temperature = 20;
 float humidity = 50;
-int temperaturUnter15 = 0;
-int temperaturUnter10 = 0;
 
-void myTimerLedEvent()
-{
-    digitalWrite(LED_BLUE, ledState);
-    ledState = !ledState;
+RTC_DATA_ATTR int bootCount = 0;
+
+void print_wakeup_reason() {
+  esp_sleep_wakeup_cause_t wakeup_reason;
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+  switch (wakeup_reason)
+  {
+    case ESP_SLEEP_WAKEUP_EXT0 : SerialMon.println("Wakeup caused by external signal using RTC_IO"); break;
+    case ESP_SLEEP_WAKEUP_EXT1 : SerialMon.println("Wakeup caused by external signal using RTC_CNTL"); break;
+    case ESP_SLEEP_WAKEUP_TIMER : SerialMon.println("Wakeup caused by timer"); break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD : SerialMon.println("Wakeup caused by touchpad"); break;
+    case ESP_SLEEP_WAKEUP_ULP : SerialMon.println("Wakeup caused by ULP program"); break;
+    default : SerialMon.println("Wakeup was not caused by deep sleep."); break;
+  }
 }
 
 void myTimerEvent()
@@ -63,32 +79,6 @@ void myTimerEvent()
   SerialMon.print(F("Temperature = "));
   SerialMon.print(temperature);
   SerialMon.println(" *C");
-  
-  if (temperature < 15)
-  {
-    if (temperaturUnter15 == 0)
-    {
-      temperaturUnter15 = 1;
-      Blynk.email("bbuehner@gmx.net", "Temperatur in Cappel-Neufeld unter 15 Grad Celsius gefallen", "Die Temperatur im Haus in Cappel-Neufeld ist unter 15 Grad Celsius gefallen");
-    }
-  }
-  else
-  {
-    temperaturUnter15 = 0;
-  }
-
-  if (temperature < 10)
-  {
-    if (temperaturUnter10 == 0)
-    {
-      temperaturUnter10 = 1;
-      Blynk.email("bbuehner@gmx.net", "Temperatur in Cappel-Neufeld unter 10 Grad Celsius gefallen", "Die Temperatur im Haus in Cappel-Neufeld ist unter 10 Grad Celsius gefallen");
-    }
-  }
-  else
-  {
-    temperaturUnter10 = 0;
-  }
   
   SerialMon.print(F("Humidity = "));
   SerialMon.print(humidity);
@@ -100,33 +90,26 @@ void myTimerEvent()
   sensorData = analogRead(PHOTOCELL_PIN);
   SerialMon.print("sensorData: ");
   SerialMon.println(sensorData);
-  if (sensorData > 2500)
-  {
-    if (stoerung == 0)
-    {
-      Blynk.email("bbuehner@gmx.net", "Störung der Heizung in Cappel-Neufeld", "Die Störungslampe an der Heizung leuchtet");
-//      Blynk.notify("Störung der Heizung in Cappel-Neufeld");
-    }
-    stoerung = 1;
-  }
-  else
-  {
-    if (stoerung == 1)
-    {
-      Blynk.email("bbuehner@gmx.net", "Störung der Heizung in Cappel-Neufeld behoben", "Die Störungslampe an der Heizung leuchtet nicht mehr");
-//      Blynk.notify("Störung der Heizung in Cappel-Neufeld behoben");
-    }
-    stoerung = 0;
-  }
-  Blynk.virtualWrite(V2, stoerung);
+  Blynk.virtualWrite(V10, bootCount);
   Blynk.virtualWrite(V3, sensorData);
 }
 
 void setup()
 {
+  ++bootCount;                    //Increment boot number and print it every reboot
   // Set console baud rate
   SerialMon.begin(115200);
-  delay(10);
+  delay(1000);
+  SerialMon.println("Boot number: " + String(bootCount));
+  print_wakeup_reason();          //Print wakeup Reason
+  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+  SerialMon.println("Setup ESP32 to sleep for every " + String(TIME_TO_SLEEP) + " Seconds");
+  SerialMon.print("Watchdog timeout = ");
+  SerialMon.print(wdtTimeout/60);
+  SerialMon.println(" minutes.");
+  esp_task_wdt_init(wdtTimeout, true); //enable panic so ESP32 restarts
+  esp_task_wdt_add(NULL); //add current thread to WDT watch
+
 
   // Keep power when running from battery
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -140,9 +123,6 @@ void setup()
   }
   Serial.println("OK");
 
-  pinMode(LED_BLUE, OUTPUT);
-  digitalWrite(LED_BLUE, LOW);
-
   // Set-up modem reset, enable, power pins
   pinMode(MODEM_PWKEY, OUTPUT);
   pinMode(MODEM_RST, OUTPUT);
@@ -155,8 +135,6 @@ void setup()
   // Set GSM module baud rate and UART pins
   SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
   delay(3000);
-
-  timerLed.setInterval(1000, myTimerLedEvent);
 
   // Restart takes quite some time
   // To skip it, call init() instead of restart()
@@ -188,14 +166,16 @@ void setup()
   SerialMon.println("Modem connected");
 
   Blynk.begin(auth, modem, apn, user, pass);
-  // Setup a function to be called every 5 minutes
-  timer.setInterval(1 * 60 * 1000, myTimerEvent);
   SerialMon.println("Blink begin");
+  myTimerEvent();
+  
+  //Go to sleep now
+  SerialMon.println("Going to sleep now");
+  delay(5000);
+  esp_deep_sleep_start();
+  SerialMon.println("This will never be printed");
 }
 
 void loop()
 {
-  Blynk.run();
-  timer.run(); // running timer 
-  timerLed.run();
 }
